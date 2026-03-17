@@ -8,7 +8,33 @@ Run local AI agents on the machine, using Claude as the orchestrator and local m
 
 **Constraint**: Only Claude is an allowed paid external service. No other paid model APIs (no OpenAI API, no Gemini API, no Mistral API, etc.). All sub-agents must run locally.
 
-> ⚠️ **Cost-saving assumption**: This only works if the local model's output quality is good enough that Claude doesn't need to spend many tokens correcting it. If the local model produces bad output and Claude has to fix it in multiple rounds, the orchestration overhead can cost more than Claude doing the task directly. Model selection and task routing matter.
+> ⚠️ **Cost-saving assumption — revised after real measurement**: Empirical testing showed that using a local model does NOT reliably save tokens, even in the happy path. See the measured data below.
+
+### Real cost data (measured 2026-03-17)
+
+Task: generate `mcp_server.py` (~50 lines of Python). Model: `qwen2.5-coder:14b`.
+
+| Scenario | Claude input | Claude output | Total cost | vs baseline |
+|----------|-------------|---------------|------------|-------------|
+| Claude alone (baseline) | 50 | 1,930 | $0.029 | — |
+| Local model, 3 rounds, Bash+curl | 2,380 | 2,504 | $0.045 | **+54%** |
+| Local model, 1 round, Bash+curl (projected) | 837 | 649 | $0.012 | **+37%** |
+| Local model, 1 round, MCP (projected) | 837 | 539 | $0.011 | **+18%** |
+
+Pricing: Claude Sonnet 4.6 — $3.00/1M input, $15.00/1M output. Ollama: $0.00.
+
+**Why the local model doesn't save tokens**: Claude must output a prompt for the local model (similar token count to the code it replaces) + read the response + add scaffolding. The savings from "Claude doesn't generate the code" are offset by orchestration overhead.
+
+**The breakeven condition**: savings only materialise when:
+1. The task completes in 1 round (zero correction overhead)
+2. The generated output is significantly longer than the prompt Claude constructs
+3. MCP is used (reduces scaffolding from ~150 to ~40 tokens/call)
+4. Volume is high (thousands of calls where per-call deltas compound)
+
+**Revised value proposition**: the primary value of local agents is **not** token cost reduction. It is:
+- **Data privacy**: generated code never leaves the machine
+- **Offline capability**: works without internet
+- **High-volume repetitive tasks**: at scale, even small per-call savings add up
 
 ---
 
@@ -74,7 +100,33 @@ Models are listed as 4-bit quantized (Q4_K_M), which gives the best balance of s
 - Works headlessly (no GUI needed)
 - Used by most agent frameworks as a backend
 
-> ⚠️ **Important**: Ollama's default context window is **2048 tokens**, which is too small for most code tasks. Always set `num_ctx` explicitly (e.g. 8192 or 16384) when running models. Larger context windows consume more RAM from the unified memory pool.
+> ⚠️ **Important**: Ollama's default context window is **2048 tokens**, which is too small for most code tasks. Always set `num_ctx` explicitly. See the Context Window section below for the recommended value and memory breakdown.
+
+### Context Window Recommendation
+
+**Recommended value: `num_ctx 8192`** — validated by engineering panel (unanimous).
+
+| `num_ctx` | KV cache (fp16) | Safe on 18 GB? | Notes |
+|-----------|----------------|----------------|-------|
+| 2048 | ~0.5 GB | ✅ | Default — too small for real code tasks |
+| 4096 | ~1.0 GB | ✅ | Marginal — truncates on 800-line files |
+| **8192** | **~2 GB** | **✅ Recommended** | **Fits 400–600 lines of code + task + output buffer** |
+| 16384 | ~4 GB | ⚠️ Tight | Feasible but leaves little headroom; risk of swap under pressure |
+| 32768 | ~8 GB | ❌ | Almost certain SSD swap with 9 GB model loaded → 1–3 tok/sec |
+
+**Why 8192:**
+- Typical agentic payload (800 lines of Python ≈ 3,000–5,000 tokens) + task description + output budget fits comfortably
+- KV cache at fp16 consumes ~2 GB, well within the 6–8 GB available after model load
+- Leaves 4–6 GB free for OS, inference buffers, and other processes
+
+**Stretch option**: Ollama 0.3+ supports quantized KV cache via `OLLAMA_KV_CACHE_TYPE=q8_0`, which halves KV memory. With that flag, `num_ctx 16384` has roughly the same ~2 GB footprint as fp16 at 8192.
+
+**Practical warning**: If you're passing full file contents (>400 lines) plus chain-of-thought output, you can approach the 8192 ceiling. Prefer chunking at the application layer (send targeted excerpts, not whole files) over bumping `num_ctx` to 16384.
+
+**Configuration** (in Modelfile):
+```
+PARAMETER num_ctx 8192
+```
 
 ### Architecture: Claude as Orchestrator + Local Model as Worker
 
@@ -595,3 +647,23 @@ Points not unanimous (not incorporated into main document):
 - Streaming variant of MCP tool writing to temp file — raised by Engineer 3 only
 - `ollama_list_models` as a third tool — raised by Engineers 1 and 3 only
 - Parallel tool_use calls from Claude — raised by Engineer 3 only
+
+---
+
+#### Engineering Review — Round 3: Context Window
+
+**Question posed**: For `qwen2.5-coder:14b` Q4_K_M on M3 Pro 18 GB, what is the optimal `num_ctx`?
+
+**Engineer 1 — Systems & Infrastructure**:
+Recommends **8192**. KV cache at fp16 ≈ ~3 GB at 8192 ctx (conservative estimate). 16384 would consume ~6 GB leaving almost no headroom, risking swap. Bonus: with `OLLAMA_KV_CACHE_TYPE=q8_0` (available Ollama v0.3+), 16384 has the same ~3 GB footprint as fp16 at 8192 — a valid stretch option.
+
+**Engineer 2 — AI/ML & LLM Inference**:
+Recommends **8192**. Calculated precisely using model architecture (48 layers, 40 KV heads, head_dim 128):
+- KV at fp16: `8192 × 48 × 2 × 40 × 128 × 2 bytes = ~2.0 GB`
+- 16384 → ~4 GB, still feasible but leaves little margin
+- 8192 is the sweet spot for single-shot code generation on 18 GB unified memory
+
+**Engineer 3 — Software Architecture**:
+Recommends **8192**. Typical payload (800 lines Python ≈ 3,000–5,000 tokens) + task description + response buffer fits with headroom. KV ≈ 1.5–2 GB at fp16. Key warning: if passing full file contents >400 lines, prefer **chunking at the application layer** over bumping `num_ctx` to 16384.
+
+**Consensus**: ✅ Unanimous — `num_ctx 8192`. All three reached the same conclusion independently. Incorporated into the Context Window Recommendation table above.

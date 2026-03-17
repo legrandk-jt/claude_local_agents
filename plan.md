@@ -8,6 +8,7 @@ Two-phase approach based on the research in `research.md`:
 - **Phase 4–6**: Build and configure the MCP server (production integration)
 - **Phase 7–8**: Write the delegation rules in CLAUDE.md
 - **Phase 9–10**: End-to-end validation
+- **Phase 10b**: Token usage calculator (measure real savings vs. baseline)
 - **Phase 11**: Pause for review
 - **Phase 12**: Commit
 
@@ -21,9 +22,9 @@ Do not start Phase 4 until Phase 1–3 confirm the delegation pattern actually p
 
 | Label | Description | Group |
 |-------|-------------|-------|
-| `PHASE-0` | Initialize git repository | Prerequisites |
-| `PHASE-1` | Install Ollama | Prerequisites |
-| `PHASE-2` | Pull and verify the primary model | Prerequisites |
+| `PHASE-0` | ✅ Initialize git repository | Prerequisites |
+| `PHASE-1` | ⚠️ Install Ollama + autostart + disable cloud | Prerequisites |
+| `PHASE-2` | ✅ Pull and verify the primary model | Prerequisites |
 | `PHASE-3` | Validate delegation via Bash + curl | Validation |
 | `PHASE-4` | Set up the Python MCP server project | MCP server |
 | `PHASE-5` | Write the MCP server | MCP server |
@@ -32,6 +33,7 @@ Do not start Phase 4 until Phase 1–3 confirm the delegation pattern actually p
 | `PHASE-8` | Configure Ollama context window | Configuration |
 | `PHASE-9` | End-to-end validation with MCP | Validation |
 | `PHASE-10` | Validate the cost-saving assumption | Validation |
+| `PHASE-10b` | Build token usage calculator | Tooling |
 | `PHASE-11` | ⏸️ Pause for review | Review |
 | `PHASE-12` | Commit and document | Commit |
 
@@ -42,81 +44,36 @@ Do not start Phase 4 until Phase 1–3 confirm the delegation pattern actually p
 ---
 
 <!-- PHASE-0 -->
-### [PHASE-0] Initialize git repository
+### [PHASE-0] Initialize git repository ✅
 
-- [ ] Initialize the repo in the project root
-  ```bash
-  git init /Users/alex/Projects/labs/local_agents
-  ```
-- [ ] Create a `.gitignore` appropriate for Python + macOS
-  ```
-  # Python
-  __pycache__/
-  *.py[cod]
-  .venv/
-  *.egg-info/
-
-  # macOS
-  .DS_Store
-
-  # Ollama
-  *.gguf
-  ```
-- [ ] Add an initial commit with the existing documents
-  ```bash
-  git add research.md plan.md .gitignore
-  git commit -m "Initial commit: research and plan for local AI agents setup"
-  ```
-- [ ] Verify the repo is clean
-  ```bash
-  git status
-  git log --oneline
-  ```
+- [x] Initialize the repo in the project root
+- [x] Create a `.gitignore` appropriate for Python + macOS
+- [x] Add an initial commit with the existing documents
+- [x] Verify the repo is clean
 
 <!-- PHASE-1 -->
-### [PHASE-1] Install Ollama
+### [PHASE-1] Install Ollama ⚠️ partial
 
-- [ ] Check if Ollama is already installed
-  ```bash
-  which ollama && ollama --version
-  ```
-- [ ] If not installed, install via Homebrew
-  ```bash
-  brew install ollama
-  ```
-- [ ] Start the Ollama daemon
-  ```bash
-  ollama serve
-  ```
-- [ ] Verify the daemon is running and the API is reachable
-  ```bash
-  curl http://localhost:11434/api/tags
-  ```
-  Expected: JSON response with a `models` array (may be empty if no models pulled yet)
+- [x] Check if Ollama is already installed — was not installed
+- [x] Install ARM native from official `.app` (Homebrew install discarded — was x86_64/Rosetta, 0.8 tok/sec; replaced with `/Applications/Ollama.app`, 13 tok/sec)
+- [x] Start the Ollama daemon — running via `ollama serve`
+- [x] Verify the daemon is running and the API is reachable — `curl localhost:11434/api/tags` ✅
+- [x] Configure Ollama to start automatically on login via the menu bar app:
+  - Open Ollama from `/Applications/Ollama.app`
+  - Click the Ollama icon in the macOS menu bar
+  - Go to **Settings → General → Start at Login** and enable it
+  - Verify: log out and back in, confirm `curl http://localhost:11434/api/tags` responds without manually starting the daemon
+- [x] Disable cloud features (violates project constraint — only Claude is an allowed external service):
+  - In Ollama Settings, find **"Cloud: enable cloud models and web search"** and **turn it OFF**
 
 <!-- PHASE-2 -->
-### [PHASE-2] Pull and verify the primary model
+### [PHASE-2] Pull and verify the primary model ✅
 
-- [ ] Pull `qwen2.5-coder:14b` (recommended model — ~9 GB download)
-  ```bash
-  ollama pull qwen2.5-coder:14b
-  ```
-- [ ] Verify the model is available
-  ```bash
-  ollama list
-  ```
-- [ ] Run a quick smoke test to confirm the model generates code
-  ```bash
-  curl -s http://localhost:11434/api/generate \
-    -d '{"model":"qwen2.5-coder:14b","prompt":"Write a Python function that returns the factorial of n.","stream":false}' \
-    | jq -r '.response'
-  ```
-  Expected: valid Python function printed to stdout
-- [ ] Note actual response time — at ~15–25 tok/sec, a short function should take 5–15 seconds
-- [ ] If `qwen2.5-coder:14b` is too slow or causes memory pressure, pull the 7B fallback
-  ```bash
-  ollama pull qwen2.5-coder:7b
-  ```
+- [x] Pull `qwen2.5-coder:14b` — 9.0 GB, Q4_K_M
+- [x] Verify the model is available — `ollama list` confirms
+- [x] Run a quick smoke test — palindrome function generated correctly
+- [x] Note actual response time — cold start 5 tok/sec, warm **13 tok/sec** (within expected range)
+- [x] 7B fallback not needed — 14B performs well on 18 GB unified memory
 
 <!-- PHASE-3 -->
 ### [PHASE-3] Validate delegation via Bash + curl (Phase 1 of the two-phase strategy)
@@ -298,6 +255,50 @@ The goal here is to confirm that the planning/generation split is useful **befor
   - How many Claude tokens were spent on orchestration vs. the output itself?
 - [ ] Decide: does the local model save tokens in practice, or does correction overhead cancel it out?
 - [ ] If the model quality is insufficient, consider switching to `qwen2.5-coder:7b` for speed or staying on 14B but narrowing the task types that are delegated
+
+<!-- PHASE-10b -->
+### [PHASE-10b] Build token usage calculator
+
+The goal is a lightweight Python script that instruments both Claude API calls and Ollama calls, logs token usage per task, and prints a session summary showing real vs. baseline cost — so we can verify the project's core objective is being met.
+
+- [ ] Create `token_calculator.py` in the project root
+- [ ] Implement a `Session` class that tracks:
+  - `claude_input_tokens` — tokens Claude received as input (orchestration overhead)
+  - `claude_output_tokens` — tokens Claude generated (orchestration overhead)
+  - `ollama_input_tokens` — tokens the local model received (free)
+  - `ollama_output_tokens` — tokens the local model generated (free)
+  - `task_name` — label for the task being measured
+- [ ] Add a `record_claude_usage(input_tokens, output_tokens)` method that reads from the Claude API response `usage` field
+- [ ] Add a `record_ollama_usage(response_json)` method that reads `prompt_eval_count` and `eval_count` from the Ollama API response
+- [ ] Add a `baseline_estimate()` method that estimates what Claude would have spent doing the task alone:
+  ```
+  baseline_input  = claude_input_tokens
+  baseline_output = claude_output_tokens + ollama_output_tokens
+  # Rationale: without local model, Claude would generate the same output itself
+  ```
+- [ ] Add a `cost(input_tokens, output_tokens, model="sonnet")` helper using current pricing:
+  - Sonnet 4.6: $3.00 / 1M input, $15.00 / 1M output
+  - Opus 4.6:   $15.00 / 1M input, $75.00 / 1M output
+- [ ] Add a `print_report()` method that outputs:
+  ```
+  ─────────────────────────────────────────
+  Task: <task_name>
+  ─────────────────────────────────────────
+  Claude tokens   input: X    output: Y    cost: $Z
+  Ollama tokens   input: X    output: Y    cost: $0.00  (local)
+  ─────────────────────────────────────────
+  Actual cost:    $A
+  Baseline cost:  $B  (Claude doing it alone)
+  Savings:        $C  (D%)
+  ─────────────────────────────────────────
+  ```
+- [ ] Add a `SessionLog` class that persists results to `token_log.jsonl` (one JSON line per task) so savings accumulate over time
+- [ ] Add a `summary()` function that reads `token_log.jsonl` and prints cumulative stats:
+  - Total tasks measured
+  - Total Claude tokens spent
+  - Total estimated savings
+  - Average savings per task
+- [ ] Write a usage example at the bottom of the file under `if __name__ == "__main__":` showing how to wrap a real task
 
 <!-- PHASE-11 -->
 ### [PHASE-11] ⏸️ Pause for review
